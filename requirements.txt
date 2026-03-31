@@ -1,4 +1,4 @@
 aiogram==3.4.1
-openai
-pytesseract
-Pillow
+openai==2.30.0
+pytesseract==0.3.13
+Pillow==12.1.1
