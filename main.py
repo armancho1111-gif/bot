@@ -4,34 +4,36 @@ import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, PreCheckoutQuery
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 from config import BOT_TOKEN, FREE_LIMIT
 from db import add_user, get_requests, increment_requests, is_paid, set_paid, add_history, get_history
 from ai import solve_task
 from ocr import extract_text
 from payments import get_payment
 from utils import simulate_progress, get_repeat_buttons
-
-# Удаляем временные файлы после использования
-import os
 import tempfile
+import os
 
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Инициализация бота
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
-logging.basicConfig(level=logging.INFO)
+# Хранилища
+user_modes = {}
+last_task = {}
 
-# Режимы
+# Кнопки
 mode_buttons = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="Только ответ", callback_data="mode_answer")],
         [InlineKeyboardButton(text="Пошаговое объяснение", callback_data="mode_full")],
     ]
 )
-history_button = InlineKeyboardMarkup(
-    inline_keyboard=[[InlineKeyboardButton(text="📜 История задач", callback_data="view_history")]]
-)
-user_modes = {}
-last_task = {}  # для кнопки "Повторить"
 
 # /start
 @dp.message(Command("start"))
@@ -43,7 +45,7 @@ async def start(message: Message):
         reply_markup=mode_buttons
     )
 
-# Callback
+# Callback handler
 @dp.callback_query()
 async def handle_callbacks(call: CallbackQuery):
     uid = call.from_user.id
@@ -56,36 +58,37 @@ async def handle_callbacks(call: CallbackQuery):
         if not history:
             await call.message.answer("📭 История пуста")
         else:
-            text = "📜 Ваша история задач:\n\n"
+            text = "📜 История задач:\n\n"
             for tsk, ans, mode, ts in history:
-                text += f"🕒 {ts}\n📝 Режим: {'Только ответ' if mode=='answer_only' else 'Пошаговое объяснение'}\n📚 Задача: {tsk[:100]}{'...' if len(tsk)>100 else ''}\n💡 Ответ: {ans[:150]}{'...' if len(ans)>150 else ''}\n\n"
-                text += "─" * 30 + "\n\n"
-            await call.message.answer(text)
+                text += f"🕒 {ts}\n📝 {tsk[:100]}\n💡 {ans[:150]}\n\n"
+            await call.message.answer(text[:4000])
         await call.answer()
     elif call.data == "buy_access":
         prices, description = get_payment()
-        await bot.send_invoice(
-            uid,
-            title="Доступ к боту",
-            description=description,
-            provider_token="YOUR_PROVIDER_TOKEN",
-            currency="USD",
-            prices=prices,
-            start_parameter="bot_access",
-            payload="paid_user"
-        )
+        try:
+            await bot.send_invoice(
+                uid,
+                title="Доступ к боту",
+                description=description,
+                provider_token="YOUR_PROVIDER_TOKEN",  # Замените на реальный токен
+                currency="USD",
+                prices=prices,
+                start_parameter="bot_access",
+                payload="paid_user"
+            )
+        except Exception as e:
+            logger.error(f"Payment error: {e}")
+            await call.message.answer("❌ Ошибка оплаты. Попробуйте позже.")
+        await call.answer()
     elif call.data == "repeat_task":
         task = last_task.get(uid)
         if task:
             await process_task(uid, task, call.message)
-        else:
-            await call.message.answer("❌ Нет сохраненной задачи для повторения")
         await call.answer()
     elif call.data == "new_task":
-        await call.message.answer("📚 Отправьте новую задачу (текстом или фото)")
+        await call.message.answer("Отправь новую задачу 📚")
         await call.answer()
 
-# Проверка лимита
 def can_use(uid):
     return is_paid(uid) or get_requests(uid) < FREE_LIMIT
 
@@ -104,69 +107,39 @@ async def handle_photo(message: Message):
         markup = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="💰 Купить доступ", callback_data="buy_access")]]
         )
-        await message.answer("❌ Лимит бесплатных задач исчерпан. Приобретите доступ для продолжения!", reply_markup=markup)
+        await message.answer("❌ Лимит бесплатных задач исчерпан.", reply_markup=markup)
         return
     
-    # Отправляем сообщение о начале обработки
     processing_msg = await message.answer("📸 Обрабатываю изображение...")
     
     try:
-        # Скачиваем фото
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         downloaded = await bot.download_file(file.file_path)
         
-        # Создаем временный файл
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
-            tmp_file.write(downloaded.read())
-            temp_path = tmp_file.name
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            tmp.write(downloaded.read())
+            temp_path = tmp.name
         
-        # Извлекаем текст через OCR
         await processing_msg.edit_text("🔍 Распознаю текст...")
         extracted_text = extract_text(temp_path, lang='rus+eng')
-        
-        # Удаляем временный файл
         os.unlink(temp_path)
         
-        # Проверяем, удалось ли извлечь текст
         if not extracted_text or extracted_text.strip() == "":
-            await processing_msg.edit_text(
-                "❌ Не удалось распознать текст на изображении.\n\n"
-                "💡 Попробуйте:\n"
-                "• Отправить более четкое фото\n"
-                "• Убедиться, что текст хорошо виден\n"
-                "• Ввести текст вручную"
-            )
+            await processing_msg.edit_text("❌ Не удалось распознать текст. Попробуйте более четкое фото.")
             return
         
-        # Обновляем сообщение
-        preview = extracted_text[:200] + '...' if len(extracted_text) > 200 else extracted_text
-        await processing_msg.edit_text(
-            f"📝 Распознанный текст:\n{preview}\n\n"
-            f"🤔 Решаю задачу..."
-        )
-        
-        # Вызываем обработку с извлеченным текстом
+        await processing_msg.edit_text(f"📝 Распознано: {extracted_text[:100]}...\n\n🤔 Решаю...")
         await process_task(uid, extracted_text, message)
-        
-        # Удаляем временное сообщение
         await processing_msg.delete()
         
     except Exception as e:
-        logging.error(f"Error processing photo: {e}")
-        await processing_msg.edit_text(
-            f"❌ Ошибка при обработке изображения: {str(e)}\n"
-            f"Попробуйте отправить текст вручную."
-        )
+        logger.error(f"Photo error: {e}")
+        await processing_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
-# Основная функция обработки
 async def process_task(uid, task, message_obj):
-    # Проверяем, что задача не пустая
     if not task or task.strip() == "":
-        await message_obj.answer(
-            "❌ Задача не распознана или пустая.\n"
-            "Пожалуйста, отправьте текст или более четкое фото."
-        )
+        await message_obj.answer("❌ Задача пустая.")
         return
     
     add_user(uid)
@@ -175,46 +148,21 @@ async def process_task(uid, task, message_obj):
         markup = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="💰 Купить доступ", callback_data="buy_access")]]
         )
-        await message_obj.answer(
-            "❌ Лимит бесплатных задач исчерпан. Приобретите доступ для продолжения!",
-            reply_markup=markup
-        )
+        await message_obj.answer("❌ Лимит исчерпан.", reply_markup=markup)
         return
-
-    # Сохраняем задачу для возможности повтора
+    
     last_task[uid] = task
-    
-    # Показываем прогресс
-    progress_msg = await simulate_progress(message_obj.chat.id, bot)
-    
-    # Получаем режим
+    await simulate_progress(message_obj.chat.id, bot)
     mode = user_modes.get(uid, "full")
     
     try:
-        # Решаем задачу
         answer = solve_task(task, mode)
-        
-        # Обновляем статистику
         increment_requests(uid)
         add_history(uid, task, answer, mode)
-        
-        # Удаляем сообщение с прогрессом
-        await progress_msg.delete()
-        
-        # Отправляем ответ
-        await message_obj.answer(
-            f"✅ **Решение:**\n\n{answer}",
-            reply_markup=get_repeat_buttons(),
-            parse_mode="HTML"
-        )
-        
+        await message_obj.answer(answer, reply_markup=get_repeat_buttons())
     except Exception as e:
-        logging.error(f"Error solving task: {e}")
-        await progress_msg.delete()
-        await message_obj.answer(
-            f"❌ Произошла ошибка при решении задачи: {str(e)}\n"
-            f"Попробуйте позже или отправьте задачу иначе."
-        )
+        logger.error(f"Task error: {e}")
+        await message_obj.answer(f"❌ Ошибка: {str(e)}")
 
 # PreCheckout
 @dp.pre_checkout_query()
@@ -226,24 +174,41 @@ async def checkout(pre_checkout_q: PreCheckoutQuery):
 async def successful_payment(message: Message):
     if message.successful_payment:
         set_paid(message.from_user.id)
-        await message.answer(
-            "✅ **Оплата успешно получена!**\n\n"
-            "🎉 Безлимитный доступ активирован!\n"
-            "Теперь вы можете решать сколько угодно задач.\n\n"
-            "Отправляйте новые задачи и я помогу их решить! 📚",
-            reply_markup=get_repeat_buttons(),
-            parse_mode="HTML"
-        )
+        await message.answer("✅ Оплата получена! Безлимитный доступ активирован.")
 
-# Обработка ошибок
-@dp.errors()
-async def error_handler(update, exception):
-    logging.error(f"Update: {update}, Exception: {exception}")
-    return True
+# Запуск
+async def on_startup():
+    logger.info("Bot started!")
+    webhook_url = f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}/webhook"
+    await bot.set_webhook(webhook_url)
+    logger.info(f"Webhook set to {webhook_url}")
 
 async def main():
-    logging.info("Бот запущен!")
-    await dp.start_polling(bot)
+    # Для Railway используем webhook
+    if os.getenv("RAILWAY_PUBLIC_DOMAIN"):
+        app = web.Application()
+        webhook_requests_handler = SimpleRequestHandler(
+            dispatcher=dp,
+            bot=bot,
+        )
+        webhook_requests_handler.register(app, path="/webhook")
+        setup_application(app, dp, bot=bot)
+        
+        # Запускаем сервер
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+        await site.start()
+        
+        # Устанавливаем webhook
+        await bot.set_webhook(f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}/webhook")
+        logger.info("Webhook server started")
+        
+        await asyncio.Event().wait()
+    else:
+        # Локально используем polling
+        logger.info("Starting polling...")
+        await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
