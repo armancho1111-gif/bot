@@ -1,35 +1,30 @@
 import os
+
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения из .env файла
 load_dotenv()
 
-# Токены
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Проверка наличия токенов
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не найден в переменных окружения!")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY не найден в переменных окружения!")
+    raise ValueError("BOT_TOKEN не найден в переменных окружения.")
 
-# Лимиты и цены
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY не найден в переменных окружения.")
+
 FREE_LIMIT = 5
 PAID_PRICE = 3.99
 CURRENCY = "USD"
 
-# Настройки
 CACHE_ENABLED = True
 DEBUG_MODE = os.getenv("DEBUG", "False").lower() == "true"
 
-# Настройки OCR
-OCR_LANGUAGE = "rus+eng"  # Языки для распознавания
+OCR_LANGUAGE = os.getenv("OCR_LANGUAGE", "rus+eng")
 
-# Настройки OpenAI
-OPENAI_MODEL = "gpt-3.5-turbo"  # Модель для использования
-OPENAI_MAX_TOKENS = 2000
-OPENAI_TEMPERATURE = 0.7
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", OPENAI_MODEL)
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "2000"))
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
 
-# Настройки базы данных
 DB_PATH = "users.db"
