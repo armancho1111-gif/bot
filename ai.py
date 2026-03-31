@@ -13,7 +13,7 @@ def solve_task(text, mode="full"):
     prompt = f"Реши задачу {'кратко' if mode=='answer_only' else 'и объясни простым языком'}: {text}"
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5.4",
         messages=[{"role": "user", "content": prompt}]
     )
 
